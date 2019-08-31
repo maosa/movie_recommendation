@@ -712,8 +712,8 @@ predicted_ratings <- test_set %>%
 reg_movie_user_genres_period_date_rmse <- RMSE(predicted_ratings, test_set$rating)
 
 rmse_results <- bind_rows(rmse_results,
-                          data.frame(model = paste0("Regularized Movie, User, Genres, Rating Period ",
-                                                    "and Date Effect Model"),
+                          data.frame(model = paste0("Regularized Movie, User, Genres, ",
+                                                    "Rating Period and Date Effect Model"),
                                      RMSE = reg_movie_user_genres_period_date_rmse,
                                      lambda = as.character(lambda),
                                      stringsAsFactors = FALSE))
@@ -953,9 +953,14 @@ Overall, this project was very interesting and exciting. It provided a great opp
 
 # Note: this process could take a couple of minutes
 
-if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
-if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
-if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse",
+                                         repos = "http://cran.us.r-project.org")
+
+if(!require(caret)) install.packages("caret",
+                                     repos = "http://cran.us.r-project.org")
+
+if(!require(data.table)) install.packages("data.table",
+                                          repos = "http://cran.us.r-project.org")
 
 # MovieLens 10M dataset:
 # https://grouplens.org/datasets/movielens/10m/
@@ -1034,8 +1039,10 @@ preds <- lapply(X = names(folds), FUN = function(f) {
     semi_join(train_tmp, by = "userId")
 
   # Add rows removed from test_set back into train_tmp
-
-  removed <- anti_join(temp, test_tmp) # generates a harmless message "Joining, by = c(..."
+  
+  # Generates a harmless message "Joining, by = c(..."
+  
+  removed <- anti_join(temp, test_tmp)
 
   train_tmp <- rbind(train_tmp, removed)
 
@@ -1088,7 +1095,8 @@ preds <- lapply(X = names(folds), FUN = function(f) {
 
     if (any(is.na(predicted_ratings))) {
 
-      warning("ERROR! Ensure that the userId and movieId in the test_tmp are also in train_tmp!")
+      warning(paste0("ERROR! Ensure that the userId and",
+                     " movieId in the test_tmp are also in train_tmp!"))
 
     } else {
 
@@ -1102,7 +1110,8 @@ preds <- lapply(X = names(folds), FUN = function(f) {
 
   # Return a data frame with the lambda that minimizes the RMSE
 
-  return(data.frame(lambda = lambdas[which.min(rmses)], rmse = min(rmses), stringsAsFactors = FALSE))
+  return(data.frame(lambda = lambdas[which.min(rmses)], rmse = min(rmses),
+                    stringsAsFactors = FALSE))
 
 }) # lapply
 
