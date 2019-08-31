@@ -1,0 +1,1260 @@
+---
+title: "MovieLens project: A movie recommendation system"
+author: "Andreas Maos"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r, setup, include = FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(lubridate)
+library(recommenderlab)
+library(cowplot)
+library(RColorBrewer)
+library(knitr)
+library(kableExtra)
+
+rm(list = ls())
+if(!is.null(dev.list())) { dev.off() }
+
+# Use the `echo = FALSE` parameter to prevent printing the R code of a chunk
+
+# To fix xcolor package warnings
+
+knit_hooks$set(crop = hook_pdfcrop, document = function(x) {
+  sub('\\usepackage[]{xcolor}', '\\usepackage[table]{xcolor}', x, fixed = TRUE)
+})
+
+```
+
+```{r, dataset_preparation, include = FALSE}
+
+################################
+# Create edx set, validation set
+################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+
+colnames(movies) <- c("movieId", "title", "genres")
+
+movies <- as.data.frame(movies) %>%
+  mutate(movieId = as.numeric(levels(movieId))[movieId],
+         title = as.character(title),
+         genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+
+edx <- movielens[-test_index, ]
+
+temp <- movielens[test_index, ]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>%
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+# Introduction
+
+## Movie recommendation systems
+
+Movie recommendation systems have been around for a while and are being used by numerous large streamig services and companies such as [Netflix](https://www.netflix.com) and [Amazon Prime Video](https://www.primevideo.com). These systems use several different methods to make personalized recommendations about movies or TV shows to customers. Their goal is for these recommendations to be as appealing as possible to each individual customer. Some of the methods used include **User-Based Collaborative Filtering (UBCF)** and **Item-Based Collaborative Filtering (IBCF)**.
+
+UBCF identifies users that thave the same taste in movies. For example, both users A and B have seen movie X and have given it the same rating, indicating that they have similar tastes. User A also saw movie Y, liked it and gave it a high rating. User B has not seen movie Y but since he has a similar taste to user A, the system will recommend movie Y to user B. The underlying machine learning algorithm of UBCF is the K-nearest neighbors (KNN) algorithm. KNN identifies the K most similar users to the *active user* (in the above example user B) and recommends to him movies that those K similar users liked.
+
+IBCF on the other hand, identifies items, in this case movies, that are similar to each other. For example, if user A liked movie X then an IBCF system will recommend to user A movies that are similar to movie X. Consider movies X, Y and Z that belong to the genres Comedy, Animation/Comedy and Drama respectively. When user A rates movie X highly, the system will recommend movie Y which is similar to the movie that he liked, instead of movie Z that belongs to a completely different genre.
+
+## The project and dataset
+
+This project constitues one of the final parts of the [Professional Certificate in Data Science by HarvardX](https://online-learning.harvard.edu/series/professional-certificate-data-science). The aim of this project was to develop a movie recommendation system. To achieve this, the MovieLens dataset created by GroupLens Research was used. Several MovieLens datasets were available but for this project the [MovieLens 10M Dataset](https://grouplens.org/datasets/movielens/10m/) was used. This contains about 10 million movie ratings and was released in 2009.
+
+To obtain this dataset in an appropriate format to begin the project, a piece of code provided by EdX was run (see Appendix section 5.1). After running this code two data frames were obtained, the **edx set** which was used to develop the algorithm, and a **validation set** which was used to test the algorithm.
+
+To evaluate how close the predictions were to the true values in the validation set, the **Root Mean Square Error (RMSE)** was calculated.
+
+The **edx set** had `r dim(edx)[1]` rows, `r dim(edx)[2]` columns, `r n_distinct(edx$userId)` users and `r n_distinct(edx$movieId)` movies. The **validation set** had `r dim(validation)[1]` rows, `r dim(validation)[2]` columns, `r n_distinct(validation$userId)` users and `r n_distinct(validation$movieId)` movies.
+
+The two sets had the same structure. In both sets, observations were found in the rows. These correspond to individual movie ratings. Features were found in the columns and these included `r colnames(edx)`. Each user and movie were assigned their own unique ID number, *userId* and *movieId*. The *rating* column contained the scores, values between 0 and 5 in 0.5 increments, assigned by each user to each movie. The *timestamp* column contained information about the date and time each rating was submitted. The information was represented as the **UNIX Epoch Time** which is the number of seconds that had elapsed since 00:00:00 Thursday, 1 January 1970. Part of the analysis included converting this in a more understandable format. The *title* column contained the title of the movie and the year it was released in parenthesis (i.e. My movie title (1995)). Finally, the *genres* column provided information about the genres in which a movie belonged to.
+
+These features provided useful information about each observation and played a pivotal role in developing the movie recommendation algorithm. In the analysis that follows 3 methods will be explored, regression, UBCF and IBCF.
+
+# Analysis
+
+## RMSE function
+
+Calculating the RMSE was an integral part of the algorithm development process as this was the measure used to evaluate the algorithm's performance. Since this computation was done multiple times throughout the project, it was worth defining a function that would easily compute it.
+
+```{r, rmse_function}
+
+RMSE <- function(true_ratings, predicted_ratings) {
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+```
+
+The above code performs the following calculation:
+
+\[\sqrt{ \frac{1}{N} \sum_{u, i} ( \hat{y}_{u, i} - y_{u, i} )^2}\]
+
+with $y_{u, i}$ corresponding the actual rating of user $u$ for movie $i$ and $\hat{y}_{u, i}$ corresponding to the model's prediction.
+
+## Data wrangling
+
+The edx and validation sets were in tidy format but required some more wrangling. Firstly, the year a movie was released was extracted from the *title* column. The regex pattern **`\\s\\(\\d{4}\\)`** along with the functions `str_extract()` and `str_replace()` were used to detect and extract the year and place it in a new column named *release_year*. Then, a new column called *rating_period* was created. This contained the difference between the year the dataset was released, 2009, and the year a movie was released, found in the *release_year* column. Finally, the *date* column was converted from the UNIX Epoch Time format to a more readable format. This was achieved using the `as_datetime()` function from the **lubridate** package. These dates were accurate to the second and hence there were many different ones. To reduce the number of distinct dates, they were rounded to the nearest week using lubridate's `round_date()`function.
+
+```{r, modify_edx_validation, include = FALSE}
+
+if (!all(str_detect(string = edx$title, pattern = '\\s\\(\\d{4}\\)'))) {
+  
+  warning("Check which movie titles do not follow the pattern: TITLE (YEAR)")
+  
+}
+
+# Extract the movie release year from the title.
+# Add it into a new column called 'release_year'.
+# Add a new column called 'date' with the timestamp converted into datetime,
+# rounded to the nearest week.
+
+edx <- edx %>%
+  mutate(
+    # Create release_year column
+    release_year = as.numeric(
+      str_replace_all(
+        string = str_extract(string = edx$title, pattern = '\\s\\(\\d{4}\\)'),
+        pattern = "\\s\\(|\\)",
+        replacement = ""
+      ) 
+    ),
+    # Remove release year, i.e. (YEAR), from title column
+    title = str_replace(
+      string = edx$title,
+      pattern = "\\s\\(\\d{4}\\)",
+      replacement = ""
+    ),
+    # Create date column and round to nearest week
+    date = round_date(as_datetime(timestamp), "week"),
+    # Convert the 'genres' column into a factor
+    genres = factor(genres),
+    # Period between release_year and dataset release year
+    rating_period = 2009 - release_year
+  )
+
+# Treat the validation set in the same way as the edx set
+
+validation <- validation %>%
+  mutate(
+    # Create release_year column
+    release_year = as.numeric(
+      str_replace_all(
+        string = str_extract(string = validation$title, pattern = '\\s\\(\\d{4}\\)'),
+        pattern = "\\s\\(|\\)",
+        replacement = ""
+      ) 
+    ),
+    # Remove release year, i.e. (YEAR), from title column
+    title = str_replace(
+      string = validation$title,
+      pattern = "\\s\\(\\d{4}\\)",
+      replacement = ""
+    ),
+    # Create date column and round to nearest week
+    date = round_date(as_datetime(timestamp), "week"),
+    # Convert the 'genres' column into a factor
+    genres = factor(genres),
+    # Period between release_year and dataset release year
+    rating_period = 2009 - release_year
+  )
+
+```
+
+## Data exploration and visualization
+
+From this point onwrads, **only the edx set was used** to build and test the model and the validation set was only used at the end to evaluate the final model.
+
+```{r, split_edx, include = FALSE}
+
+# Split the edx set into train_set and test_set
+
+set.seed(1)
+
+train_index <- createDataPartition(y = edx$rating, times = 1, p = 0.75, list = FALSE)
+
+train_set <- edx[train_index, ]
+
+temp <- edx[-train_index, ]
+
+# Make sure userId and movieId in the test_set are also in train_set
+
+test_set <- temp %>%
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+# Add rows removed from test_set back into train_set
+
+removed <- anti_join(temp, test_set) # generates a harmless message "Joining, by = c(..."
+
+train_set <- rbind(train_set, removed)
+
+rm(temp, removed)
+
+```
+
+Several plots were created to explore basic data characteristics that would help in building the recommendation model.
+
+Plot **A** shows the average rating for some of the most popular genres. Genres with 50000 movies or more were kept and the average rating for each genre was calculated.
+
+Plot **B** shows the number of ratings per user. Plot **C** shows the number of ratings per movie. In both cases there are users or movies with very few ratings. These observations could introduce uncerainty and negatively affect the model resulting in unreliable predictions.
+
+Plot **D** shows the frequecy of each possible rating (`r seq(0, 5, 0.5)`). One can see that whole number ratings are more common than ratings with half points. It is also evident that ratings of 3 and 4 are the most common.
+
+Plot **E** shows the average rating per rating submission date (rounded to the nearest week). This shows that the date a rating was submitted had a minor effect on the rating. Therefore, it might not be advantageous for this feature to be included in the model. Further exploration of this effect will take place downstream.
+
+Plot **F** shows the average rating per rating period. Rating period is the number of years between the year a movie was released and 2009, the year the MovieLens 10M Dataset was released. A larger number for the rating period corresponds to movies that were released in earlier years. It seems that many movies that were released 37 or more years before 2009 received a higher rating. A reason for this could be that movies that have been around for longer had more time, and therefore more chances, to be seen by more people or to gain popularity and hence to receive a lot of high ratings. This could suggest that the rating period could provide useful information when making predictions.
+
+```{r, exploratory_plots, fig.width = 8, fig.height = 12, echo = FALSE}
+
+popular_genres <- table(edx$genres) %>%
+  data.frame() %>%
+  rename(genres = Var1, count = Freq) %>%
+  filter(count >= 50000) %>%
+  left_join(edx, by = "genres") %>%
+  group_by(genres) %>%
+  summarize(rating = mean(rating)) %>%
+  mutate(genres = reorder(genres, rating)) %>%
+  ggplot(mapping = aes(x = genres, y = rating)) +
+  geom_bar(stat = "identity", color = "grey30", fill = "lightskyblue") +
+  labs(title = "Average rating per genre", x = "Genres", y = "Average rating") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 10),
+        axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+user_ratings <- edx %>%
+  group_by(userId) %>%
+  summarize(n = n()) %>%
+  ggplot(mapping = aes(n)) +
+  geom_histogram(bins = 30, color = "grey30", fill = "lightskyblue") +
+  scale_x_log10() +
+  labs(title = "Number of ratings per user ID", x = "User ID", y = "Number of ratings") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+movie_ratings <- edx %>%
+  group_by(movieId) %>%
+  summarize(n = n()) %>%
+  ggplot(mapping = aes(n)) +
+  geom_histogram(bins = 30, color = "grey30", fill = "lightskyblue") +
+  scale_x_log10() +
+  labs(title = "Number of ratings per movie ID", x = "Movie ID", y = "Number of ratings") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+rating_counts <- edx %>%
+  group_by(rating) %>%
+  summarize(n = n()) %>%
+  ggplot(mapping = aes(x = rating, y = n)) +
+  geom_bar(stat = "identity", color = "grey30", fill = "lightskyblue") +
+  labs(title = "Count of each rating", x = "Rating", y = "Count") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+rating_date <- edx %>%
+  group_by(date) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(mapping = aes(x = date, y = rating)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess") +
+  labs(title = "Average rating per submission date", x = "Date", y = "Average rating") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+rating_period <- edx %>%
+  group_by(rating_period) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(mapping = aes(x = rating_period, y = rating)) +
+  geom_point() +
+  geom_smooth(method = "loess") +
+  labs(title = "Average rating per rating period",
+       x = "Rating period (years)", y = "Average rating") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+# Looks like the movies released in earlier years are more highly rated.
+# Maybe this is because they have been around for longer and hence
+# more people had the chance to see and rate them.
+
+plot_grid(popular_genres, user_ratings, movie_ratings, rating_counts, rating_date, rating_period,
+          ncol = 2, nrow = 3, labels = "AUTO")
+
+```
+
+## Building the regression model
+
+With the MovieLens 10M Dataset containing about 10 million ratings, it was quite hard to fit complicated machine learning models. Even performing simple calculations or data wrangling operations would take several seconds to minutes on a standard laptop, while consuming a lot of CPU capacity and RAM. Hence, to mitigate part of this effect, the edx set was further split into a training set and a test set containing 75% and 25% of the observations respectively. This was done using the `createDataPartition()` function from the **caret** package. The training set was used to build and fit the model and the test set was used to test the model's accuracy using the RMSE function defined above. Only when the model was optimized as much as possible, the validation set was used to evaluate the model.
+
+### Just the average
+
+The simplest idea, that was used as the starting material for the model, was that all movies were predicted to have a rating equal to the average movie rating in the training set with any differences explained by random variation ($\epsilon_{u, i}$).
+
+\[Y_{u, i} = \mu + \epsilon_{u, i}\]
+
+```{r, just_the_average, include = FALSE}
+
+mu_rating <- mean(train_set$rating) # avarage rating for all movies/users
+
+rmse_results <- data.frame(model = "Just the average",
+                           RMSE = RMSE(mu_rating, test_set$rating),
+                           lambda = "-",
+                           stringsAsFactors = FALSE)
+
+```
+
+The average rating was `r round(mu_rating, 4)` while the RMSE for this model was **`r round(RMSE(mu_rating, test_set$rating), 4)`**. This was not very good but it was a solid starting point.
+
+### Movie and user model
+
+It is a fact that different movies are rated differently and therefore some movies will generally be rated higher than others. This is called the **movie-specific effect**. Also, users differ in how they rate movies and hence there is substantial variability across users as well. For example, some users will consistenly give low or high ratings while others are somewhere in the middle. This is called the **user-specific effect**. These effects can be seen from the plots below.
+
+```{r, average_rating_per_movie_or_user, fig.height = 2, echo = FALSE}
+
+mean_rating_per_movie <- edx %>%
+  mutate(movieId = as.numeric(movieId)) %>%
+  group_by(movieId) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(mapping = aes(x = movieId, y = rating)) +
+  geom_point(alpha = 0.10) +
+  labs(title = "Average rating per movie ID", x = "Movie ID", y = "Average rating") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+mean_rating_per_user <- edx %>%
+  mutate(userId = as.numeric(userId)) %>%
+  group_by(userId) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(mapping = aes(x = userId, y = rating)) +
+  geom_point(alpha = 0.10) +
+  labs(title = "Average rating per user ID", x = "User ID", y = "Average rating") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+plot_grid(mean_rating_per_movie, mean_rating_per_user, ncol = 2, nrow = 1, labels = c("G", "H"))
+
+```
+
+These considerations allow the addition of a term $b_i$ to the model. This represents the average rating for movie $i$. They also suggest that a term $b_u$ can be added, representing the user-specific effect (the average rating for each user). The model now looks like this:
+
+\[Y_{u, i} = \mu + b_i + b_u + \epsilon_{u, i}\]
+
+To calculate $b_i$ the average of $Y_{u, i} - \mu$ was used.
+
+To calculate $b_u$ the average of $Y_{u, i} - \mu - b_i$ was used.
+
+```{r, movie_user_model, include = FALSE}
+
+movie_avgs <- train_set %>%
+  group_by(movieId) %>%
+  summarize(b_i = mean(rating - mu_rating)) # the movie model
+
+user_avgs <- train_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu_rating - b_i)) # the movie and user model
+
+predicted_ratings <- test_set %>%
+  left_join(movie_avgs, by = 'movieId') %>%
+  left_join(user_avgs, by = 'userId') %>%
+  mutate(pred = mu_rating + b_i + b_u) %>%
+  .$pred
+
+movie_user_rmse <- RMSE(predicted_ratings, test_set$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          data.frame(model = "Movie and User",
+                                     RMSE = movie_user_rmse,
+                                     lambda = "-",
+                                     stringsAsFactors = FALSE))
+
+```
+
+The RMSE for this model was **`r round(movie_user_rmse, 4)`**. There is a clear improvement but the model can be further optimized.
+
+### Sanity check
+
+```{r sanity_check, echo = FALSE}
+
+# Get all movie titles
+
+movie_titles <- train_set %>%
+  select(movieId, title) %>%
+  distinct()
+
+# 10 best movies based on the estimates of the movie effect (b_i)
+
+top_10_a <- train_set %>%
+  dplyr::count(movieId) %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  left_join(movie_titles, by = "movieId") %>%
+  arrange(desc(b_i)) %>%
+  select(title, b_i, n) %>%
+  slice(1:10)
+
+# 10 worst movies based on the estimates of the movie effect (b_i)
+
+bottom_10_a <- train_set %>%
+  dplyr::count(movieId) %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  left_join(movie_titles, by = "movieId") %>%
+  arrange(b_i) %>%
+  select(title, b_i, n) %>%
+  slice(1:10)
+
+top_bottom_a <- rbind(top_10_a, bottom_10_a)
+
+pos_b_i_a <- which(top_bottom_a$b_i > 0)
+neg_b_i_a <- which(top_bottom_a$b_i < 0)
+
+top_bottom_a %>%
+  rename(Title = title, `Number of ratings` = n) %>%
+  knitr::kable(align = c("l", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("bordered")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "black") %>%
+  row_spec(pos_b_i_a, background = "green", color = "black") %>%
+  row_spec(neg_b_i_a, background = "red", color = "black")
+
+```
+
+The table above shows the top (green) and worst (red) 10 movies by $b_i$ along with the number of ratings for each one. It is clear that the number of ratings is very small. This introduces a lot of uncertainty resulting in smaller or larger estimates of $b_i$. These noisy estimates result in untrustworthy predictions. Also, looking at the movie titles one can sense that something is wrong as it can be expected to see more popular movies in the green rows.
+
+### Regularized movie and user model
+
+**Regularization** can be used to overcome the variability introduced by estimates coming from small samples by penilizing large estimates that come from such samples. The equation the model minimizes now becomes:
+
+\[\frac{1}{N}\sum_{u, i}(y_{u, i}-\mu-b_i-b_u)^2 + \lambda(\sum_i b_{i}^2 + \sum_u b_{u}^2)\]
+
+with the values of $b$ that minimize the above equation being calculated using:
+
+\[\hat{b}_{i}(\lambda) = \frac{1}{\lambda+n_i}\sum_{u=1}^{n_i}(Y_{u, i} - \hat{\mu}),\]
+
+with $n_i$ being the number of ratings for movie $i$. The larger the value of $\lambda$, the more the estimate shrinks.
+
+$\lambda$ is a tunable parameter and hence a range of different values needed to be tested in order to decide which one minimized the RMSE. In this model, values from 4 to 6 in 0.2 increments were tested in an `sapply()` function to generate a vector of RMSEs and from that choose the best $\lambda$.
+
+```{r, reg_movie_user_model, include = FALSE}
+
+# Part of the code below has been commented out to speed up knitting the report
+
+# The sapply loop was run in a separate R script to determine the optimum value of lambda
+
+# See appendix for full uncommented code
+
+# Use a range of lambdas to choose the one that minimizes the RMSE
+
+# lambdas <- seq(4, 6, 0.2)
+# 
+# rmses <- sapply(lambdas, function(l) {
+#   
+#   print(paste0("Lambda = ", l))
+#   
+#   b_i <- train_set %>%
+#     group_by(movieId) %>%
+#     summarize(b_i = sum(rating - mu_rating) / (n() + l), n_i = n())
+#   
+#   b_u <- train_set %>%
+#     left_join(b_i, by = "movieId") %>%
+#     group_by(userId) %>%
+#     summarize(b_u = sum(rating - mu_rating - b_i) / (n() + l))
+#   
+#   predicted_ratings <- test_set %>%
+#     left_join(b_i, by = "movieId") %>%
+#     left_join(b_u, by = "userId") %>%
+#     mutate(pred = mu_rating + b_i + b_u) %>%
+#     .$pred
+#   
+#   return(RMSE(predicted_ratings, test_set$rating))
+#   
+# })
+# 
+# qplot(x = lambdas, y = rmses)
+# 
+# lambda <- lambdas[which.min(rmses)]
+
+lambda <- 4.8
+
+# Make predictions using the optimum lambda
+
+b_i <- train_set %>%
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu_rating) / (n() + lambda), n_i = n())
+
+b_u <- train_set %>%
+  left_join(b_i, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - mu_rating - b_i) / (n() + lambda))
+
+predicted_ratings <- test_set %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  mutate(pred = mu_rating + b_i + b_u) %>%
+  .$pred
+
+reg_movie_user_rmse <- RMSE(predicted_ratings, test_set$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          data.frame(model = "Regularized Movie and User",
+                                     RMSE = reg_movie_user_rmse,
+                                     lambda = as.character(lambda),
+                                     stringsAsFactors = FALSE))
+
+```
+
+The optimum $\lambda$ for this model was **`r lambda`** and the RMSE was **`r round(reg_movie_user_rmse, 4)`**. Additional features be considered to further improve the model!
+
+### Validate the regularization results
+
+The same sanity check as before was performed on the regularized results. The movies shown in the table now make much more sense to have a high or low $b_i$ value and the number of ratings is significantly higher than those of the movies previously listed. This proves that regularization improved the estimates.
+
+```{r, validate_reg_results, echo = FALSE}
+
+movie_reg_avgs <- train_set %>%
+  group_by(movieId) %>% 
+  summarize(b_i = sum(rating - mu_rating) / (n() + lambda), n_i = n())
+
+# 10 best movies based on the estimates of the movie effect (b_i)
+
+top_10_b <- train_set %>%
+  dplyr::count(movieId) %>%
+  left_join(movie_reg_avgs, by = "movieId") %>%
+  left_join(movie_titles, by = "movieId") %>%
+  arrange(desc(b_i)) %>%
+  select(title, b_i, n) %>%
+  slice(1:10)
+
+# 10 worst movies based on the estimates of the movie effect (b_i)
+
+bottom_10_b <- train_set %>%
+  dplyr::count(movieId) %>%
+  left_join(movie_reg_avgs, by = "movieId") %>%
+  left_join(movie_titles, by = "movieId") %>%
+  arrange(b_i) %>%
+  select(title, b_i, n) %>%
+  slice(1:10)
+
+top_bottom_b <- rbind(top_10_b, bottom_10_b)
+
+pos_b_i_b <- which(top_bottom_b$b_i > 0)
+neg_b_i_b <- which(top_bottom_b$b_i < 0)
+
+top_bottom_b %>%
+  rename(Title = title, `Number of ratings` = n) %>%
+  knitr::kable(align = c("l", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("bordered")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "black") %>%
+  row_spec(pos_b_i_b, background = "green", color = "black") %>%
+  row_spec(neg_b_i_b, background = "red", color = "black")
+
+```
+
+### Regularized Movie, User, Genres, Rating Period and Date Effect Model
+
+Three new features were introduced into the model. The genres a movie belongs to, $b_g$, the number of years between 2009 (when the MovieLens 10M Dataset was released) and the year a movie was released, $b_r$ and the date the rating was submitted rounded to the nearest week, $b_t$. These could be found in the *genres*, *rating_period* and *date* columns respectively. The model now looks like this:
+
+\[\frac{1}{N}\sum_{u, i}(y_{u, i} - \mu - b_i - b_u - b_g - b_r - b_t)^2 + \lambda(\sum_i b_{i}^2 + \sum_u b_{u}^2 + \sum_g b_{g}^2 + \sum_r b_{r}^2 + \sum_t b_{t}^2)\]
+
+```{r, reg_movie_user_genres_period_date_model, include = FALSE}
+
+# Use a range of lambdas to choose the one that minimizes the RMSE
+
+lambdas <- seq(4, 6, 0.2)
+
+rmses <- sapply(lambdas, function(l) {
+  
+  print(paste0("Lambda = ", l))
+  
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu_rating) / (n() + l), n_i = n())
+  
+  b_u <- train_set %>%
+    left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - mu_rating - b_i) / (n() + l))
+  
+  b_g <- train_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(genres) %>%
+    summarize(b_g = sum(rating - mu_rating - b_i - b_u) / (n() + l))
+  
+  b_r <- train_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_g, by = "genres") %>%
+    group_by(rating_period) %>%
+    summarize(b_r = sum(rating - mu_rating - b_i - b_u - b_g) / (n() + l))
+  
+  b_t <- train_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_g, by = "genres") %>%
+    left_join(b_r, by = "rating_period") %>%
+    group_by(date) %>%
+    summarize(b_t = sum(rating - mu_rating - b_i - b_u - b_g - b_r) / (n() + l))
+  
+  predicted_ratings <- test_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_g, by = "genres") %>%
+    left_join(b_r, by = "rating_period") %>%
+    left_join(b_t, by = "date") %>%
+    mutate(pred = mu_rating + b_i + b_u + b_g + b_r + b_t) %>%
+    .$pred
+  
+  return(RMSE(predicted_ratings, test_set$rating))
+  
+}) # sapply
+
+# Make predictions using the optimum lambda
+
+lambda <- lambdas[which.min(rmses)]
+
+b_i <- train_set %>%
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu_rating) / (n() + lambda), n_i = n())
+
+b_u <- train_set %>%
+  left_join(b_i, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - mu_rating - b_i) / (n() + lambda))
+
+b_g <- train_set %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  group_by(genres) %>%
+  summarize(b_g = sum(rating - mu_rating - b_i - b_u) / (n() + lambda))
+
+b_r <- train_set %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  group_by(rating_period) %>%
+  summarize(b_r = sum(rating - mu_rating - b_i - b_u - b_g) / (n() + lambda))
+
+b_t <- train_set %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  left_join(b_r, by = "rating_period") %>%
+  group_by(date) %>%
+  summarize(b_t = sum(rating - mu_rating - b_i - b_u - b_g - b_r) / (n() + lambda))
+
+predicted_ratings <- test_set %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  left_join(b_r, by = "rating_period") %>%
+  left_join(b_t, by = "date") %>%
+  mutate(pred = mu_rating + b_i + b_u + b_g + b_r + b_t) %>%
+  .$pred
+
+reg_movie_user_genres_period_date_rmse <- RMSE(predicted_ratings, test_set$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          data.frame(model = paste0("Regularized Movie, User, Genres, Rating Period ",
+                                                    "and Date Effect Model"),
+                                     RMSE = reg_movie_user_genres_period_date_rmse,
+                                     lambda = as.character(lambda),
+                                     stringsAsFactors = FALSE))
+
+# Calculate the improvement in RMSE between each model
+
+model_improvement <- sapply(X = 1:(nrow(rmse_results) - 1), FUN = function(r) {
+  
+  current_row <- r
+  
+  next_row <- r + 1
+  
+  imp <- (rmse_results$RMSE[current_row] - rmse_results$RMSE[next_row]) * 100 /
+    rmse_results$RMSE[current_row]
+  
+  return(round(imp, 4))
+  
+})
+
+rmse_results <- rmse_results %>%
+  mutate(improvement = c("-", model_improvement),
+         RMSE = round(RMSE, 4)) %>%
+  select(model, RMSE, improvement, lambda)
+
+```
+
+The optimum $\lambda$ for this model was **`r lambda`** and the RMSE was **`r round(reg_movie_user_genres_period_date_rmse, 4)`**.
+
+To validate that the value of $\lambda$ obtained above was the best one, **cross-validation** was used. Four-fold cross-validation was used to split the data into 4 folds, each consisting of 75% training data and 25% test data. Essentially, the training set obtained by splitting the edx set at the beginning, was further split into 4 folds with a training and test set in each fold. For each fold, a range of lambdas was used to make predictions using the model discussed above. The lambda that minimized the RMSE was returned for each fold and at the end the mean of all the lambdas returned was computed. This verified that the value of $\lambda$ obtained above was the optimal one (see Appendix section 5.2 for the cross-validation code).
+
+### Model evaluation using the validation set
+
+```{r, fit_model_edx, include = FALSE}
+
+edx_rating <- mean(edx$rating) # avarage rating for all movies/users
+
+b_i <- edx %>%
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - edx_rating) / (n() + lambda), n_i = n())
+
+b_u <- edx %>%
+  left_join(b_i, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - edx_rating - b_i) / (n() + lambda))
+
+b_g <- edx %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  group_by(genres) %>%
+  summarize(b_g = sum(rating - edx_rating - b_i - b_u) / (n() + lambda))
+
+b_r <- edx %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  group_by(rating_period) %>%
+  summarize(b_r = sum(rating - edx_rating - b_i - b_u - b_g) / (n() + lambda))
+
+b_t <- edx %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  left_join(b_r, by = "rating_period") %>%
+  group_by(date) %>%
+  summarize(b_t = sum(rating - edx_rating - b_i - b_u - b_g - b_r) / (n() + lambda))
+
+# Make predictions using the optimum lambda
+
+predicted_ratings <- validation %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  left_join(b_r, by = "rating_period") %>%
+  left_join(b_t, by = "date") %>%
+  mutate(pred = edx_rating + b_i + b_u + b_g + b_r + b_t) %>%
+  .$pred
+
+rmse_edx <- RMSE(predicted_ratings, validation$rating)
+
+rmse_results <- bind_rows(rmse_results,
+                          data.frame(model = "Validation set",
+                                     RMSE = round(rmse_edx, 4),
+                                     improvement = "-",
+                                     lambda = as.character(lambda),
+                                     stringsAsFactors = FALSE))
+
+```
+
+After gradually building and optimizing the model, it was fitted and evaluated on the validation set. One last adjustment took place before this. Originally, to make computations faster, the edx set was split into training and test sets. While building the model, a value $\mu$ was used that represented the average rating for all observations in the **training set obtained from the edx set**. Therefore, before fitting and testing the final model on the validation set, **the average rating for all observations in the edx set** was used as $\mu$. The value of $\lambda$ remained the same as the one obtained above. Using the new value of $\mu$, the RMSE on the validation set was **`r round(rmse_edx, 4)`**.
+
+## The recommenderlab package
+
+```{r, recommenderlab, include = FALSE}
+
+invisible(gc()) # free up unused memory
+
+# Create a sparse matrix of the edx set.
+# Each user gets a row.
+# Each movie gets a column.
+
+edx_fac <- edx %>%
+  mutate(userId = factor(userId),
+         movieId = factor(movieId))
+
+sparse_ratings <- sparseMatrix(
+  i = as.numeric(edx_fac$userId),
+  j = as.numeric(edx_fac$movieId),
+  x = edx_fac$rating, 
+  dims = c(length(unique(edx_fac$userId)),
+           length(unique(edx_fac$movieId))))
+
+rownames(sparse_ratings) = levels(edx_fac$userId)
+
+colnames(sparse_ratings) = levels(edx_fac$movieId)
+
+rm(edx_fac)
+
+# Convert sparse_ratings to a recommenderlab sparse matrix
+
+rating_matrix <- new("realRatingMatrix", data = sparse_ratings)
+
+# Select users that have seen/rated many movies
+# Select movies that have been watched/rated by many users
+
+min_movies <- quantile(rowCounts(rating_matrix), 0.9)
+
+min_users <- quantile(colCounts(rating_matrix), 0.9)
+
+movie_ratings <- rating_matrix[rowCounts(rating_matrix) > min_movies,
+                               colCounts(rating_matrix) > min_users]
+
+set.seed(1)
+
+# Use 4-fold cross-validation.
+# 25 ratings of 25% of users are excluded for testing.
+# the evaluationScheme() function runs for a while.
+
+e <- evaluationScheme(movie_ratings, method = "cross-validation", k = 4, given = -25)
+
+## UBCF
+
+# Use the UBCF algorithm from the recommenderlab package
+
+n <- 80
+
+model_ubcf <- Recommender(getData(e, "train"), "UBCF",
+                          param = list(normalize = "center", method = "Cosine", nn = n))
+  
+# Make predictions
+  
+preds_ubcf <- predict(model_ubcf, getData(e, "known"), type = "ratings")
+  
+# Calculate the RMSE for the UBCF model
+  
+rmse_ubcf <- calcPredictionAccuracy(preds_ubcf, getData(e, "unknown"))[1]
+
+## IBCF
+
+# Use the IBCF algorithm from the recommenderlab package
+
+set.seed(1)
+
+k <- 700
+
+model_ibcf <- Recommender(getData(e, "train"), method = "IBCF",
+                          param = list(normalize = "center", method = "Cosine", k = k))
+  
+prediction <- predict(model_ibcf, getData(e, "known"), type = "ratings")
+  
+rmse_ibcf <- calcPredictionAccuracy(prediction, getData(e, "unknown"))[1]
+
+```
+
+The `recommenderlab` package provides tools and methods to develop and test different recommender algorithms some of which include, User-based collborative filtering (UBCF), Item-based collborative filtering (IBCF), SVD with column-mean imputation (SVD) and Popular items (POPULAR). UCBF and ICBF were discussed at the beginning and were both explored in the following sections. Due to limited copmuting resources, the algorithms were applied on a subset of the edx set and were not used to make predictions on the validation set. Hence, the RMSEs obtained were not reported in the results. The code for running UCBF and ICBF using the recommenderlab package can be found in the Appendix.
+
+Initially, the edx set was converted to a sparse matrix with user IDs in the rows, movie IDs in the columns and the matrix cells filled with the ratings. This means that many cells contained an NA as not all users had rated all movies. For both algorithms, 4-fold cross-valiadtion was used meaning that the matrix was split into 4 folds with each fold consisting of a 75% of the fold as the training set and 25% as the test set. A range of different values was used as the number of nearest neighbours and the RMSE for each one was calculated.
+
+For UBCF, the number of nearest neighbours used was `r n` and the RMSE was `r round(rmse_ubcf, 4)` while for IBCF the number of nearest neighbours used was `r k` and the RMSE was `r round(rmse_ibcf, 4)`. It is clear that UBCF returns a lower RMSE and is hence superior than IBCF in making predictions.
+
+# Results
+
+The plot below shows how the RMSE for the final model changed with each $\lambda$. A concave up shape can be observed with a minimum point at $\lambda =$ `r lambda`.
+
+```{r, reg_lambda_rmse, fig.height = 3, echo = FALSE}
+
+reg_lambda_rmse <- data.frame(lambda = lambdas, rmse = rmses) %>%
+  ggplot(mapping = aes(x = lambda, y = rmse)) +
+  geom_point() +
+  labs(title = "RMSE per lambda", x = "Lambda", y = "RMSE") +
+  theme_minimal() +
+  theme(axis.line.x = element_line(color = "black", size = 0.5),
+        axis.line.y = element_line(color = "black", size = 0.5),
+        axis.ticks = element_line())
+
+reg_lambda_rmse
+
+```
+
+The table below shows how the RMSE changed with each of the model's evolution. For the models that utilised regularization, the optimum value of $\lambda$ is also shown. **The first 4 rows of the table (white) show the RMSEs when fitting the model on the training set and evaulating it on the test set.** As a reminder, the training and test sets were created by splitting the edx set into two subsets, 75% and 25% respectively.
+
+The final row (green), shows the RMSE and $\lambda$ for the fourth and best model fitted on the whole edx set and then **validated on the validation set**. Hence, **the minimum RMSE obtained using the final model was `r round(rmse_edx, 4)` using a $\lambda$ of `r lambda`**. The percentage improvement in the RMSE on the validation set was not calculated as all the previous percentages refer to the RMSE improvements on the training set, not the validation set.
+
+```{r, rmse_results, echo = FALSE}
+
+rmse_results %>%
+  rename(Model = model, `Improvement (%)` = improvement, Lambda = lambda) %>%
+  knitr::kable(align = c("l", "c", "c", "c")) %>%
+  kable_styling(bootstrap_options = c("bordered"), full_width = TRUE) %>%
+  row_spec(row = 0, bold = TRUE, color = "white", background = "black") %>%
+  row_spec(1:(which.min(rmse_results$RMSE) - 1), color = "black") %>%
+  row_spec(row = which.min(rmse_results$RMSE),
+           background = "green", color = "black", bold = TRUE)
+
+```
+
+# Conclusion
+
+The aim of this project was to use different data science techniques to develop a movie recommendation system using the MovieLens 10M Dataset. To achieve this, a linear regression model was built. To optimize and evaluate the model, the edx set was split into training and test sets. Cross-validation was used to optimize the tunable parameter $\lambda$ needed for regularization. After finalizing the model, it was used to make predictions on the validation set and the RMSE for those predictions was calculated to be **`r round(rmse_edx, 4)`**. This value showed that a linear regression model with regularized effects on movies, users, genres, rating period and rating submission date (rounded to the nearest week) can quite accurately predict movie ratings and hence be used to predict if a user will like (high rating) or not (low rating) a given movie. Therefore, further steps could include using this model to predict user ratings on different movies and recommend movies predicted to receive a rating of more than 3.5, for example. Also, the UBCF and IBCF algorithms of the recommenderlab package were tested on a subset of the edx set. Reasonably good predictions were obtained with the RMSE for the UBCF algorithm being lower than that of the linear regression model. The UBCF and IBCF models could not be used to make predictions on the validation set due to memory constraints.
+
+A significant challenge of this study was the memory limit. As the MovieLens 10M Dataset contained about 10 million observations, it was impossible to fit more sophisticated machine learning models, such as KNN, on the whole edx set. A way to fit such models could be to filter out some observations from the edx and validation sets, but this would come at the cost of losing information contained in the filtered out observations. Additionally, Principal Component Analysis (PCA) could be performed to identify hidden structure in the data not captured by the linear regression model. One could identify how many principal components were needed to capture most of the variation in the data, 90% for example, to reduce the dimensionality and then fit an appropriate machine learning model.
+
+Overall, this project was very interesting and exciting. It provided a great opportunity to learn how recommendation systems work and how they are being used by major companies to benefit their business and serve customers. Several data science techniques had to be used to successfully complete the project and it was a good opportunity to hone existing skills and develop new ones. Looking forward to more data science projects like this one!
+
+---
+
+\newpage
+
+# Appendix
+
+## EdX code to get the edx and validation sets
+
+```{r, eval = FALSE}
+
+################################
+# Create edx set, validation set
+################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+
+colnames(movies) <- c("movieId", "title", "genres")
+
+movies <- as.data.frame(movies) %>%
+  mutate(movieId = as.numeric(levels(movieId))[movieId],
+         title = as.character(title),
+         genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+
+edx <- movielens[-test_index, ]
+
+temp <- movielens[test_index, ]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>%
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+\newpage
+
+## Choosing lambda using cross-validation
+
+```{r, validate_lambda, eval = FALSE}
+
+set.seed(1)
+
+folds <- createFolds(y = train_set$rating, k = 4, list = TRUE, returnTrain = TRUE)
+
+# THE CODE BELOW RUNS FOR SEVERAL MINUTES
+
+preds <- lapply(X = names(folds), FUN = function(f) {
+
+  lambdas <- seq(0, 7, 0.2)
+
+  index <- folds[[f]]
+
+  train_tmp <- train_set[index, ]
+
+  temp <- train_set[-index, ]
+
+  # Make sure userId and movieId in the test_tmp are also in train_tmp
+
+  test_tmp <- temp %>%
+    semi_join(train_tmp, by = "movieId") %>%
+    semi_join(train_tmp, by = "userId")
+
+  # Add rows removed from test_set back into train_tmp
+
+  removed <- anti_join(temp, test_tmp) # generates a harmless message "Joining, by = c(..."
+
+  train_tmp <- rbind(train_tmp, removed)
+
+  rm(temp, removed)
+
+  # Calculate the RMSE for each lambda
+
+  rmses <- sapply(X = lambdas, FUN = function(l) {
+
+    print(paste0("Lambda = ", l))
+    
+    b_i <- train_tmp %>%
+      group_by(movieId) %>%
+      summarize(b_i = sum(rating - mu_rating) / (n() + l), n_i = n())
+    
+    b_u <- train_tmp %>%
+      left_join(b_i, by = "movieId") %>%
+      group_by(userId) %>%
+      summarize(b_u = sum(rating - mu_rating - b_i) / (n() + l))
+    
+    b_g <- train_tmp %>%
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      group_by(genres) %>%
+      summarize(b_g = sum(rating - mu_rating - b_i - b_u) / (n() + l))
+    
+    b_r <- train_tmp %>%
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      left_join(b_g, by = "genres") %>%
+      group_by(rating_period) %>%
+      summarize(b_r = sum(rating - mu_rating - b_i - b_u - b_g) / (n() + l))
+    
+    b_t <- train_tmp %>%
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      left_join(b_g, by = "genres") %>%
+      left_join(b_r, by = "rating_period") %>%
+      group_by(date) %>%
+      summarize(b_t = sum(rating - mu_rating - b_i - b_u - b_g - b_r) / (n() + l))
+    
+    predicted_ratings <- test_tmp %>%
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      left_join(b_g, by = "genres") %>%
+      left_join(b_r, by = "rating_period") %>%
+      left_join(b_t, by = "date") %>%
+      mutate(pred = mu_rating + b_i + b_u + b_g + b_r + b_t) %>%
+      .$pred
+
+    if (any(is.na(predicted_ratings))) {
+
+      warning("ERROR! Ensure that the userId and movieId in the test_tmp are also in train_tmp!")
+
+    } else {
+
+      # Return a vector with the RMSEs
+
+      return(RMSE(predicted_ratings, test_tmp$rating))
+
+    } # else
+
+  }) # nested sapply
+
+  # Return a data frame with the lambda that minimizes the RMSE
+
+  return(data.frame(lambda = lambdas[which.min(rmses)], rmse = min(rmses), stringsAsFactors = FALSE))
+
+}) # lapply
+
+names(preds) <- names(folds) # name the entries in the list
+
+all_folds <- do.call(rbind, preds) # join the list entries into a single data frame
+
+# Calculate the mean of all the different lambdas obtained and use that for predictions
+
+lambda <- mean(all_folds$lambda)
+
+lambda
+
+```
+
+\newpage
+
+## UBCF
+
+```{r, ubcf_code, eval = FALSE}
+
+invisible(gc()) # clear unused memory
+
+# Create a sparse matrix of the edx set.
+# Each user gets a row.
+# Each movie gets a column.
+
+edx_fac <- edx %>%
+  mutate(userId = factor(userId),
+         movieId = factor(movieId))
+
+sparse_ratings <- sparseMatrix(
+  i = as.numeric(edx_fac$userId),
+  j = as.numeric(edx_fac$movieId),
+  x = edx_fac$rating, 
+  dims = c(length(unique(edx_fac$userId)),
+           length(unique(edx_fac$movieId))))
+
+rownames(sparse_ratings) = levels(edx_fac$userId)
+
+colnames(sparse_ratings) = levels(edx_fac$movieId)
+
+rm(edx_fac)
+
+# Convert sparse_ratings to a recommenderlab sparse matrix
+
+rating_matrix <- new("realRatingMatrix", data = sparse_ratings)
+
+# Select users that have seen/rated many movies
+# Select movies that have been watched/rated by many users
+
+min_movies <- quantile(rowCounts(rating_matrix), 0.9)
+
+min_users <- quantile(colCounts(rating_matrix), 0.9)
+
+movie_ratings <- rating_matrix[rowCounts(rating_matrix) > min_movies,
+                               colCounts(rating_matrix) > min_users]
+
+set.seed(1)
+
+# Use 4-fold cross-validation.
+# 25 ratings of 25% of users are excluded for testing.
+# the evaluationScheme() function runs for a while.
+
+e <- evaluationScheme(movie_ratings, method = "cross-validation", k = 4, given = -25)
+
+# Use algorithms from the recommenderlab package
+
+# UBCF
+
+nns <- seq(50, 80, 5)
+
+# Loop takes several minutes to run
+
+rmses_ucbf <- sapply(X = nns, FUN = function(n) {
+  
+  print(paste0("UBCF: nn = ", n)) # to keep track of progress
+  
+  model_ubcf <- Recommender(getData(e, "train"), "UBCF",
+                            param = list(normalize = "center", method = "Cosine", nn = n))
+  
+  # Make predictions
+  
+  preds_ubcf <- predict(model_ubcf, getData(e, "known"), type = "ratings")
+  
+  # Calculate the RMSE for the UBCF model
+  
+  rmse_ubcf <- calcPredictionAccuracy(preds_ubcf, getData(e, "unknown"))[1]
+  
+  return(rmse_ubcf)
+  
+}) # sapply
+
+qplot(x = nns, y = rmses_ucbf)
+
+nns[which.min(rmses_ucbf)] # best value of nearest neighbours to use
+
+min(rmses_ucbf) # minimum RMSE
+
+```
+
+\newpage
+
+## IBCF
+
+```{r, ibcf_code, eval = FALSE}
+
+set.seed(1)
+
+ks <- seq(350, 700, 25)
+
+# Loop takes several minutes to run
+
+rmses_ibcf <- sapply(X = ks, FUN = function(k) {
+  
+  print(paste0("IBCF: k = ", k)) # to keep track of progress
+  
+  model_ibcf <- Recommender(getData(e, "train"), method = "IBCF",
+                            param = list(normalize = "center", method = "Cosine", k = k))
+  
+  prediction <- predict(model_ibcf, getData(e, "known"), type = "ratings")
+  
+  rmse_ibcf <- calcPredictionAccuracy(prediction, getData(e, "unknown"))[1]
+  
+  return(rmse_ibcf)
+  
+}) # sapply
+
+qplot(x = ks, y = rmses_ibcf)
+
+ks[which.min(rmses_ibcf)] # best value of k to use
+
+min(rmses_ibcf) # minimum RMSE
+
+```
+
+## Operating system
+
+```{r, operating_system, echo = FALSE}
+
+version
+
+```
+
+\newpage
+
+## R session information
+
+```{r, session_info, echo = FALSE}
+
+sessionInfo()
+
+```
+
+---
