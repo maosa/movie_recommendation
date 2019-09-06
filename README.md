@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is part of the final section of the [Professional Certificate in Data Science by HarvardX](https://online-learning.harvard.edu/series/professional-certificate-data-science) offer by [edX](https://www.edx.org). The aim of the project was to develop a movie recommendation system. The data for this study were obtained from the [MovieLens 10M Dataset](https://grouplens.org/datasets/movielens/10m/).
+This project is part of the final section of the [Professional Certificate in Data Science by HarvardX](https://online-learning.harvard.edu/series/professional-certificate-data-science) offered by [edX](https://www.edx.org). The aim of the project was to develop a movie recommendation system. The data for this study were obtained from the [MovieLens 10M Dataset](https://grouplens.org/datasets/movielens/10m/).
 
 The linear regression model developed was able to predict movie ratings for each user with reasonable accuracy.
 
